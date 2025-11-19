@@ -4,11 +4,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GroupFit - Find Your Workout Crew</title>
+    
+    <!-- React -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    
     <style>
         .fade-in {
             animation: fadeIn 0.3s ease-in;
@@ -38,6 +50,18 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -46,12 +70,47 @@
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
 
+        // ============================================
+        // FIREBASE CONFIGURATION
+        // ============================================
+        // IMPORTANT: Replace with your Firebase config
+        const firebaseConfig = {
+            // YOU NEED TO REPLACE THESE VALUES WITH YOUR OWN FROM FIREBASE
+            apiKey: "YOUR-API-KEY",
+            authDomain: "YOUR-AUTH-DOMAIN",
+            projectId: "YOUR-PROJECT-ID",
+            storageBucket: "YOUR-STORAGE-BUCKET",
+            messagingSenderId: "YOUR-MESSAGING-SENDER-ID",
+            appId: "YOUR-APP-ID"
+        };
+
+        // Initialize Firebase
+        let db = null;
+        let auth = null;
+        let isFirebaseEnabled = false;
+
+        // Check if Firebase config is provided
+        if (firebaseConfig.apiKey !== "YOUR-API-KEY") {
+            try {
+                firebase.initializeApp(firebaseConfig);
+                db = firebase.firestore();
+                auth = firebase.auth();
+                isFirebaseEnabled = true;
+                console.log("✅ Firebase initialized successfully!");
+            } catch (error) {
+                console.error("Firebase initialization error:", error);
+                isFirebaseEnabled = false;
+            }
+        } else {
+            console.warn("⚠️ Firebase not configured. Running in local mode. Sessions won't sync between users.");
+        }
+
         const GroupFitApp = () => {
             // Authentication States
             const [isLoggedIn, setIsLoggedIn] = useState(false);
             const [isSignUp, setIsSignUp] = useState(false);
             const [currentUser, setCurrentUser] = useState(null);
-            const [users, setUsers] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
             
             // App States
             const [sessions, setSessions] = useState([]);
@@ -63,6 +122,7 @@
             const [filterExercise, setFilterExercise] = useState('all');
             const [filterAgeRange, setFilterAgeRange] = useState({ min: 14, max: 19 });
             const [notifications, setNotifications] = useState([]);
+            const [showSetupGuide, setShowSetupGuide] = useState(false);
 
             // Exercise Types
             const exerciseTypes = [
@@ -78,26 +138,102 @@
                 { id: 'hiking', name: 'Hiking', icon: 'fa-hiking', color: 'bg-green-600' }
             ];
 
-            // Load data from localStorage
+            // Initialize and listen to Firebase data
             useEffect(() => {
-                const savedUsers = localStorage.getItem('groupfit_users');
-                const savedSessions = localStorage.getItem('groupfit_sessions');
-                const savedChats = localStorage.getItem('groupfit_chats');
-                const savedCurrentUser = localStorage.getItem('groupfit_current_user');
-
-                if (savedUsers) setUsers(JSON.parse(savedUsers));
-                if (savedSessions) setSessions(JSON.parse(savedSessions));
-                if (savedChats) setChats(JSON.parse(savedChats));
-                if (savedCurrentUser) {
-                    const user = JSON.parse(savedCurrentUser);
-                    setCurrentUser(user);
-                    setIsLoggedIn(true);
-                    if (user.location) {
-                        setUserLocation(user.location);
+                if (!isFirebaseEnabled) {
+                    // Local storage fallback
+                    const savedUser = localStorage.getItem('groupfit_current_user');
+                    const savedSessions = localStorage.getItem('groupfit_sessions');
+                    const savedChats = localStorage.getItem('groupfit_chats');
+                    
+                    if (savedUser) {
+                        const user = JSON.parse(savedUser);
+                        setCurrentUser(user);
+                        setIsLoggedIn(true);
                     }
+                    if (savedSessions) setSessions(JSON.parse(savedSessions));
+                    if (savedChats) setChats(JSON.parse(savedChats));
+                    setIsLoading(false);
+                    return;
                 }
 
-                // Request geolocation
+                // Firebase auth listener
+                const unsubscribeAuth = auth.onAuthStateChanged(async (user) => {
+                    if (user) {
+                        // Get user data from Firestore
+                        try {
+                            const userDoc = await db.collection('users').doc(user.uid).get();
+                            if (userDoc.exists) {
+                                setCurrentUser({ id: user.uid, ...userDoc.data() });
+                                setIsLoggedIn(true);
+                                
+                                // Load user's location
+                                const userData = userDoc.data();
+                                if (userData.location) {
+                                    setUserLocation(userData.location);
+                                }
+                            }
+                        } catch (error) {
+                            console.error("Error fetching user data:", error);
+                        }
+                    } else {
+                        setCurrentUser(null);
+                        setIsLoggedIn(false);
+                    }
+                    setIsLoading(false);
+                });
+
+                // Real-time sessions listener
+                let unsubscribeSessions = () => {};
+                if (isFirebaseEnabled) {
+                    unsubscribeSessions = db.collection('sessions')
+                        .orderBy('createdAt', 'desc')
+                        .onSnapshot((snapshot) => {
+                            const sessionsData = [];
+                            snapshot.forEach((doc) => {
+                                sessionsData.push({ id: doc.id, ...doc.data() });
+                            });
+                            setSessions(sessionsData);
+                        }, (error) => {
+                            console.error("Error fetching sessions:", error);
+                            showNotification("Error loading sessions. Please refresh.", 'error');
+                        });
+                }
+
+                // Real-time chats listener
+                let unsubscribeChats = () => {};
+                if (isFirebaseEnabled) {
+                    unsubscribeChats = db.collection('chats')
+                        .onSnapshot((snapshot) => {
+                            const chatsData = {};
+                            snapshot.forEach((doc) => {
+                                chatsData[doc.id] = doc.data().messages || [];
+                            });
+                            setChats(chatsData);
+                        }, (error) => {
+                            console.error("Error fetching chats:", error);
+                        });
+                }
+
+                // Cleanup
+                return () => {
+                    unsubscribeAuth();
+                    unsubscribeSessions();
+                    unsubscribeChats();
+                };
+            }, []);
+
+            // Save to localStorage when Firebase is not available
+            useEffect(() => {
+                if (!isFirebaseEnabled) {
+                    if (currentUser) localStorage.setItem('groupfit_current_user', JSON.stringify(currentUser));
+                    localStorage.setItem('groupfit_sessions', JSON.stringify(sessions));
+                    localStorage.setItem('groupfit_chats', JSON.stringify(chats));
+                }
+            }, [currentUser, sessions, chats]);
+
+            // Request geolocation
+            useEffect(() => {
                 if (navigator.geolocation) {
                     navigator.geolocation.getCurrentPosition(
                         (position) => {
@@ -107,12 +243,6 @@
                                 city: 'Current Location'
                             };
                             setUserLocation(newLocation);
-                            if (savedCurrentUser) {
-                                const user = JSON.parse(savedCurrentUser);
-                                user.location = newLocation;
-                                setCurrentUser(user);
-                                localStorage.setItem('groupfit_current_user', JSON.stringify(user));
-                            }
                         },
                         (error) => {
                             console.log('Geolocation not available, using default location');
@@ -120,27 +250,6 @@
                     );
                 }
             }, []);
-
-            // Save data to localStorage
-            useEffect(() => {
-                if (users.length > 0) localStorage.setItem('groupfit_users', JSON.stringify(users));
-                localStorage.setItem('groupfit_sessions', JSON.stringify(sessions));
-                localStorage.setItem('groupfit_chats', JSON.stringify(chats));
-                if (currentUser) localStorage.setItem('groupfit_current_user', JSON.stringify(currentUser));
-            }, [users, sessions, chats, currentUser]);
-
-            // Auto-refresh chats every 2 seconds when chat is open
-            useEffect(() => {
-                if (selectedSession) {
-                    const interval = setInterval(() => {
-                        const savedChats = localStorage.getItem('groupfit_chats');
-                        if (savedChats) {
-                            setChats(JSON.parse(savedChats));
-                        }
-                    }, 2000);
-                    return () => clearInterval(interval);
-                }
-            }, [selectedSession]);
 
             // Calculate distance between two coordinates
             const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -173,11 +282,122 @@
                     const exerciseMatch = filterExercise === 'all' || session.exerciseType === filterExercise;
                     const ageMatch = session.ageRange.min <= filterAgeRange.max && 
                                      session.ageRange.max >= filterAgeRange.min;
-                    const notFull = session.participants.length < session.maxParticipants;
+                    const notFull = session.participants ? session.participants.length < session.maxParticipants : true;
                     const notPast = new Date(session.dateTime) > new Date();
                     
                     return distance <= maxDistance && exerciseMatch && ageMatch && notFull && notPast;
                 });
+            };
+
+            // Firebase Setup Guide Modal
+            const FirebaseSetupGuide = () => {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+                        <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6">
+                            <div className="flex justify-between items-center mb-6">
+                                <h2 className="text-2xl font-bold text-gray-800">Enable Online Sync (Firebase Setup)</h2>
+                                <button onClick={() => setShowSetupGuide(false)} className="text-gray-500 hover:text-gray-700">
+                                    <i className="fas fa-times text-2xl"></i>
+                                </button>
+                            </div>
+                            
+                            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
+                                <p className="text-yellow-700">
+                                    <i className="fas fa-info-circle mr-2"></i>
+                                    Currently running in <strong>Local Mode</strong>. Sessions are only visible on your device.
+                                </p>
+                            </div>
+
+                            <div className="prose max-w-none">
+                                <h3 className="text-xl font-semibold mb-4">Quick Setup (10 minutes)</h3>
+                                
+                                <div className="space-y-6">
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 1: Create Firebase Project</h4>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm">
+                                            <li>Go to <a href="https://console.firebase.google.com" target="_blank" className="text-blue-600 underline">Firebase Console</a></li>
+                                            <li>Click "Create a project" or "Add project"</li>
+                                            <li>Name it "GroupFit" and continue</li>
+                                            <li>Disable Google Analytics (not needed) and create project</li>
+                                        </ol>
+                                    </div>
+
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 2: Enable Authentication</h4>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm">
+                                            <li>In Firebase Console, click "Authentication" in left menu</li>
+                                            <li>Click "Get started"</li>
+                                            <li>Choose "Email/Password" as sign-in method</li>
+                                            <li>Enable the first toggle (Email/Password)</li>
+                                            <li>Click "Save"</li>
+                                        </ol>
+                                    </div>
+
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 3: Create Database</h4>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm">
+                                            <li>Click "Firestore Database" in left menu</li>
+                                            <li>Click "Create database"</li>
+                                            <li>Choose "Start in test mode" (we'll secure it later)</li>
+                                            <li>Select your nearest location</li>
+                                            <li>Click "Enable"</li>
+                                        </ol>
+                                    </div>
+
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 4: Get Your Config</h4>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm">
+                                            <li>Click the gear icon ⚙️ → "Project settings"</li>
+                                            <li>Scroll down to "Your apps" section</li>
+                                            <li>Click "</>" (Web) icon</li>
+                                            <li>Name it "GroupFit Web" and register</li>
+                                            <li>Copy the firebaseConfig object shown</li>
+                                        </ol>
+                                    </div>
+
+                                    <div className="bg-blue-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 5: Update Your Code</h4>
+                                        <p className="text-sm mb-2">Replace the Firebase config in your index.html file (lines 75-82):</p>
+                                        <pre className="bg-gray-800 text-white p-3 rounded text-xs overflow-x-auto">
+{`const firebaseConfig = {
+    apiKey: "your-actual-api-key-here",
+    authDomain: "groupfit-xxxxx.firebaseapp.com",
+    projectId: "groupfit-xxxxx",
+    storageBucket: "groupfit-xxxxx.appspot.com",
+    messagingSenderId: "123456789",
+    appId: "1:123456789:web:abcdef"
+};`}
+                                        </pre>
+                                    </div>
+
+                                    <div className="bg-green-50 p-4 rounded-lg">
+                                        <h4 className="font-semibold text-lg mb-2">Step 6: Deploy</h4>
+                                        <ol className="list-decimal list-inside space-y-2 text-sm">
+                                            <li>Save the updated index.html file</li>
+                                            <li>Commit and push to GitHub</li>
+                                            <li>Wait 2-5 minutes for GitHub Pages to update</li>
+                                            <li>Refresh the page - you should see "✅ Firebase initialized!"</li>
+                                        </ol>
+                                    </div>
+                                </div>
+
+                                <div className="mt-6 p-4 bg-purple-50 rounded-lg">
+                                    <h4 className="font-semibold text-lg mb-2">🎉 That's it!</h4>
+                                    <p className="text-sm">Once Firebase is connected, all users will see the same sessions in real-time. Messages, sessions, and user data will sync automatically across all devices!</p>
+                                </div>
+
+                                <div className="mt-4 flex justify-end">
+                                    <button
+                                        onClick={() => setShowSetupGuide(false)}
+                                        className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700"
+                                    >
+                                        Got it!
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
             };
 
             // Authentication Component
@@ -188,10 +408,10 @@
                 const [age, setAge] = useState('');
                 const [city, setCity] = useState('');
                 const [confirmPassword, setConfirmPassword] = useState('');
-                const [rememberMe, setRememberMe] = useState(false);
                 const [showPassword, setShowPassword] = useState(false);
+                const [isAuthLoading, setIsAuthLoading] = useState(false);
 
-                const handleSignUp = () => {
+                const handleSignUp = async () => {
                     if (!email || !password || !name || !age || !city || !confirmPassword) {
                         showNotification('Please fill in all fields', 'error');
                         return;
@@ -218,22 +438,7 @@
                         return;
                     }
 
-                    // Check if email already exists
-                    if (users.some(u => u.email === email)) {
-                        showNotification('An account with this email already exists', 'error');
-                        return;
-                    }
-
-                    // Create new user
-                    const newUser = {
-                        id: Date.now().toString(),
-                        email,
-                        password, // In production, this should be hashed!
-                        name,
-                        age: ageNum,
-                        joinedSessions: [],
-                        createdAt: new Date().toISOString()
-                    };
+                    setIsAuthLoading(true);
 
                     // Get coordinates for city
                     const cityCoords = {
@@ -255,32 +460,91 @@
                     };
                     
                     const coords = cityCoords[city] || { lat: 40.7128, lng: -74.0060 };
-                    newUser.location = { ...coords, city };
+                    const location = { ...coords, city };
 
-                    setUsers([...users, newUser]);
-                    setCurrentUser(newUser);
-                    setUserLocation(newUser.location);
-                    setIsLoggedIn(true);
-                    showNotification('Account created successfully!', 'success');
+                    if (isFirebaseEnabled) {
+                        try {
+                            // Create Firebase auth user
+                            const userCredential = await auth.createUserWithEmailAndPassword(email, password);
+                            const user = userCredential.user;
+
+                            // Save user data to Firestore
+                            await db.collection('users').doc(user.uid).set({
+                                name,
+                                email,
+                                age: ageNum,
+                                location,
+                                joinedSessions: [],
+                                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                            });
+
+                            showNotification('Account created successfully!', 'success');
+                        } catch (error) {
+                            console.error("Signup error:", error);
+                            showNotification(error.message || 'Error creating account', 'error');
+                        }
+                    } else {
+                        // Local storage fallback
+                        const newUser = {
+                            id: Date.now().toString(),
+                            email,
+                            password,
+                            name,
+                            age: ageNum,
+                            location,
+                            joinedSessions: [],
+                            createdAt: new Date().toISOString()
+                        };
+                        
+                        const existingUsers = JSON.parse(localStorage.getItem('groupfit_users') || '[]');
+                        existingUsers.push(newUser);
+                        localStorage.setItem('groupfit_users', JSON.stringify(existingUsers));
+                        localStorage.setItem('groupfit_current_user', JSON.stringify(newUser));
+                        
+                        setCurrentUser(newUser);
+                        setUserLocation(location);
+                        setIsLoggedIn(true);
+                        showNotification('Account created successfully!', 'success');
+                    }
+
+                    setIsAuthLoading(false);
                 };
 
-                const handleLogin = () => {
+                const handleLogin = async () => {
                     if (!email || !password) {
                         showNotification('Please enter email and password', 'error');
                         return;
                     }
 
-                    const user = users.find(u => u.email === email && u.password === password);
-                    if (user) {
-                        setCurrentUser(user);
-                        if (user.location) {
-                            setUserLocation(user.location);
+                    setIsAuthLoading(true);
+
+                    if (isFirebaseEnabled) {
+                        try {
+                            await auth.signInWithEmailAndPassword(email, password);
+                            showNotification('Welcome back!', 'success');
+                        } catch (error) {
+                            console.error("Login error:", error);
+                            showNotification(error.message || 'Invalid email or password', 'error');
                         }
-                        setIsLoggedIn(true);
-                        showNotification(`Welcome back, ${user.name}!`, 'success');
                     } else {
-                        showNotification('Invalid email or password', 'error');
+                        // Local storage fallback
+                        const users = JSON.parse(localStorage.getItem('groupfit_users') || '[]');
+                        const user = users.find(u => u.email === email && u.password === password);
+                        
+                        if (user) {
+                            localStorage.setItem('groupfit_current_user', JSON.stringify(user));
+                            setCurrentUser(user);
+                            if (user.location) {
+                                setUserLocation(user.location);
+                            }
+                            setIsLoggedIn(true);
+                            showNotification(`Welcome back, ${user.name}!`, 'success');
+                        } else {
+                            showNotification('Invalid email or password', 'error');
+                        }
                     }
+
+                    setIsAuthLoading(false);
                 };
 
                 return (
@@ -290,6 +554,20 @@
                                 <i className="fas fa-users text-6xl text-blue-600 mb-4"></i>
                                 <h1 className="text-4xl font-bold text-gray-800 mb-2">GroupFit</h1>
                                 <p className="text-gray-600">Find Your Workout Crew</p>
+                                {!isFirebaseEnabled && (
+                                    <div className="mt-4 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                                        <p className="text-sm text-yellow-800">
+                                            <i className="fas fa-exclamation-triangle mr-2"></i>
+                                            Running in local mode. 
+                                            <button 
+                                                onClick={() => setShowSetupGuide(true)}
+                                                className="text-blue-600 underline ml-1"
+                                            >
+                                                Enable online sync
+                                            </button>
+                                        </p>
+                                    </div>
+                                )}
                             </div>
                             
                             <div className="mb-6">
@@ -408,52 +686,23 @@
                                     </div>
                                 )}
 
-                                {!isSignUp && (
-                                    <div className="flex items-center justify-between">
-                                        <label className="flex items-center">
-                                            <input
-                                                type="checkbox"
-                                                checked={rememberMe}
-                                                onChange={(e) => setRememberMe(e.target.checked)}
-                                                className="mr-2"
-                                            />
-                                            <span className="text-sm text-gray-600">Remember me</span>
-                                        </label>
-                                        <button className="text-sm text-blue-600 hover:underline">
-                                            Forgot password?
-                                        </button>
-                                    </div>
-                                )}
-
                                 <button
                                     onClick={isSignUp ? handleSignUp : handleLogin}
-                                    className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200"
+                                    disabled={isAuthLoading}
+                                    className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
-                                    {isSignUp ? 'Create Account' : 'Login'}
+                                    {isAuthLoading ? (
+                                        <div className="flex items-center justify-center">
+                                            <div className="loading-spinner w-5 h-5 mr-2"></div>
+                                            Processing...
+                                        </div>
+                                    ) : (
+                                        isSignUp ? 'Create Account' : 'Login'
+                                    )}
                                 </button>
-
-                                {!isSignUp && (
-                                    <div className="text-center">
-                                        <p className="text-sm text-gray-600">
-                                            Don't have an account?{' '}
-                                            <button
-                                                onClick={() => setIsSignUp(true)}
-                                                className="text-blue-600 hover:underline"
-                                            >
-                                                Sign up
-                                            </button>
-                                        </p>
-                                    </div>
-                                )}
                             </div>
 
-                            {!isSignUp && (
-                                <div className="mt-6 pt-6 border-t">
-                                    <p className="text-xs text-gray-500 text-center">
-                                        Demo Account: test@groupfit.com / password123
-                                    </p>
-                                </div>
-                            )}
+                            {showSetupGuide && <FirebaseSetupGuide />}
                         </div>
                     </div>
                 );
@@ -472,30 +721,71 @@
                     description: '',
                     skillLevel: 'all'
                 });
+                const [isCreating, setIsCreating] = useState(false);
 
-                const handleCreate = () => {
+                const handleCreate = async () => {
                     if (!sessionData.title || !sessionData.location.address || !sessionData.dateTime) {
                         showNotification('Please fill in all required fields', 'error');
                         return;
                     }
 
+                    setIsCreating(true);
+
                     const newSession = {
-                        id: Date.now().toString(),
                         ...sessionData,
-                        host: currentUser,
-                        participants: [currentUser],
+                        host: {
+                            id: currentUser.id,
+                            name: currentUser.name,
+                            email: currentUser.email
+                        },
+                        participants: [{
+                            id: currentUser.id,
+                            name: currentUser.name,
+                            email: currentUser.email
+                        }],
                         createdAt: new Date().toISOString()
                     };
 
-                    setSessions([...sessions, newSession]);
-                    setChats({
-                        ...chats,
-                        [newSession.id]: []
-                    });
-                    
-                    currentUser.joinedSessions.push(newSession.id);
-                    showNotification('Session created successfully!', 'success');
-                    onClose();
+                    if (isFirebaseEnabled) {
+                        try {
+                            // Add session to Firestore
+                            const docRef = await db.collection('sessions').add({
+                                ...newSession,
+                                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                            });
+
+                            // Create chat for this session
+                            await db.collection('chats').doc(docRef.id).set({
+                                sessionId: docRef.id,
+                                messages: []
+                            });
+
+                            // Update user's joined sessions
+                            await db.collection('users').doc(currentUser.id).update({
+                                joinedSessions: firebase.firestore.FieldValue.arrayUnion(docRef.id)
+                            });
+
+                            showNotification('Session created successfully!', 'success');
+                            onClose();
+                        } catch (error) {
+                            console.error("Error creating session:", error);
+                            showNotification('Error creating session. Please try again.', 'error');
+                        }
+                    } else {
+                        // Local storage fallback
+                        newSession.id = Date.now().toString();
+                        setSessions([...sessions, newSession]);
+                        setChats({
+                            ...chats,
+                            [newSession.id]: []
+                        });
+                        
+                        currentUser.joinedSessions = [...(currentUser.joinedSessions || []), newSession.id];
+                        showNotification('Session created successfully!', 'success');
+                        onClose();
+                    }
+
+                    setIsCreating(false);
                 };
 
                 return (
@@ -629,9 +919,10 @@
                                 <div className="flex space-x-4">
                                     <button
                                         onClick={handleCreate}
-                                        className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200"
+                                        disabled={isCreating}
+                                        className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 disabled:opacity-50"
                                     >
-                                        Create Session
+                                        {isCreating ? 'Creating...' : 'Create Session'}
                                     </button>
                                     <button
                                         onClick={onClose}
@@ -653,43 +944,82 @@
                     userLocation.lat, userLocation.lng,
                     session.location.lat, session.location.lng
                 ).toFixed(1);
-                const isJoined = session.participants.some(p => p.id === currentUser.id);
-                const isFull = session.participants.length >= session.maxParticipants;
+                const participants = session.participants || [];
+                const isJoined = participants.some(p => p.id === currentUser.id);
+                const isFull = participants.length >= session.maxParticipants;
                 const sessionDate = new Date(session.dateTime);
 
-                const handleJoin = () => {
+                const handleJoin = async () => {
                     if (!isJoined && !isFull) {
-                        const updatedSessions = sessions.map(s => {
-                            if (s.id === session.id) {
-                                return {
-                                    ...s,
-                                    participants: [...s.participants, currentUser]
-                                };
+                        const updatedParticipants = [...participants, {
+                            id: currentUser.id,
+                            name: currentUser.name,
+                            email: currentUser.email
+                        }];
+
+                        if (isFirebaseEnabled) {
+                            try {
+                                await db.collection('sessions').doc(session.id).update({
+                                    participants: updatedParticipants
+                                });
+                                
+                                await db.collection('users').doc(currentUser.id).update({
+                                    joinedSessions: firebase.firestore.FieldValue.arrayUnion(session.id)
+                                });
+
+                                showNotification(`Joined "${session.title}"!`, 'success');
+                            } catch (error) {
+                                console.error("Error joining session:", error);
+                                showNotification('Error joining session. Please try again.', 'error');
                             }
-                            return s;
-                        });
-                        setSessions(updatedSessions);
-                        currentUser.joinedSessions.push(session.id);
-                        setCurrentUser({...currentUser});
-                        showNotification(`Joined "${session.title}"!`, 'success');
+                        } else {
+                            // Local storage update
+                            const updatedSessions = sessions.map(s => {
+                                if (s.id === session.id) {
+                                    return { ...s, participants: updatedParticipants };
+                                }
+                                return s;
+                            });
+                            setSessions(updatedSessions);
+                            currentUser.joinedSessions = [...(currentUser.joinedSessions || []), session.id];
+                            setCurrentUser({...currentUser});
+                            showNotification(`Joined "${session.title}"!`, 'success');
+                        }
                     }
                 };
 
-                const handleLeave = () => {
+                const handleLeave = async () => {
                     if (isJoined && session.host.id !== currentUser.id) {
-                        const updatedSessions = sessions.map(s => {
-                            if (s.id === session.id) {
-                                return {
-                                    ...s,
-                                    participants: s.participants.filter(p => p.id !== currentUser.id)
-                                };
+                        const updatedParticipants = participants.filter(p => p.id !== currentUser.id);
+
+                        if (isFirebaseEnabled) {
+                            try {
+                                await db.collection('sessions').doc(session.id).update({
+                                    participants: updatedParticipants
+                                });
+                                
+                                await db.collection('users').doc(currentUser.id).update({
+                                    joinedSessions: firebase.firestore.FieldValue.arrayRemove(session.id)
+                                });
+
+                                showNotification(`Left "${session.title}"`, 'info');
+                            } catch (error) {
+                                console.error("Error leaving session:", error);
+                                showNotification('Error leaving session. Please try again.', 'error');
                             }
-                            return s;
-                        });
-                        setSessions(updatedSessions);
-                        currentUser.joinedSessions = currentUser.joinedSessions.filter(id => id !== session.id);
-                        setCurrentUser({...currentUser});
-                        showNotification(`Left "${session.title}"`, 'info');
+                        } else {
+                            // Local storage update
+                            const updatedSessions = sessions.map(s => {
+                                if (s.id === session.id) {
+                                    return { ...s, participants: updatedParticipants };
+                                }
+                                return s;
+                            });
+                            setSessions(updatedSessions);
+                            currentUser.joinedSessions = currentUser.joinedSessions.filter(id => id !== session.id);
+                            setCurrentUser({...currentUser});
+                            showNotification(`Left "${session.title}"`, 'info');
+                        }
                     }
                 };
 
@@ -722,7 +1052,7 @@
                             </div>
                             <div className="flex items-center text-sm text-gray-600">
                                 <i className="fas fa-users mr-2"></i>
-                                {session.participants.length}/{session.maxParticipants} participants (Ages {session.ageRange.min}-{session.ageRange.max})
+                                {participants.length}/{session.maxParticipants} participants (Ages {session.ageRange.min}-{session.ageRange.max})
                             </div>
                             <div className="flex items-center text-sm text-gray-600">
                                 <i className="fas fa-clock mr-2"></i>
@@ -782,27 +1112,50 @@
                 const [message, setMessage] = useState('');
                 const [sessionChats, setSessionChats] = useState(chats[session.id] || []);
                 const chatEndRef = useRef(null);
+                const [isSending, setIsSending] = useState(false);
+
+                useEffect(() => {
+                    setSessionChats(chats[session.id] || []);
+                }, [chats, session.id]);
 
                 useEffect(() => {
                     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
                 }, [sessionChats]);
 
-                const sendMessage = () => {
-                    if (message.trim()) {
+                const sendMessage = async () => {
+                    if (message.trim() && !isSending) {
+                        setIsSending(true);
                         const newMessage = {
                             id: Date.now().toString(),
-                            sender: currentUser,
+                            sender: {
+                                id: currentUser.id,
+                                name: currentUser.name
+                            },
                             text: message,
                             timestamp: new Date().toISOString()
                         };
-                        
-                        const updatedChats = [...sessionChats, newMessage];
-                        setSessionChats(updatedChats);
-                        setChats({
-                            ...chats,
-                            [session.id]: updatedChats
-                        });
-                        setMessage('');
+
+                        if (isFirebaseEnabled) {
+                            try {
+                                await db.collection('chats').doc(session.id).update({
+                                    messages: firebase.firestore.FieldValue.arrayUnion(newMessage)
+                                });
+                                setMessage('');
+                            } catch (error) {
+                                console.error("Error sending message:", error);
+                                showNotification('Error sending message', 'error');
+                            }
+                        } else {
+                            // Local storage update
+                            const updatedChats = [...sessionChats, newMessage];
+                            setSessionChats(updatedChats);
+                            setChats({
+                                ...chats,
+                                [session.id]: updatedChats
+                            });
+                            setMessage('');
+                        }
+                        setIsSending(false);
                     }
                 };
 
@@ -812,7 +1165,7 @@
                             <div className="flex justify-between items-center p-6 border-b">
                                 <div>
                                     <h2 className="text-xl font-bold text-gray-800">{session.title}</h2>
-                                    <p className="text-sm text-gray-600">{session.participants.length} members</p>
+                                    <p className="text-sm text-gray-600">{session.participants?.length || 0} members</p>
                                 </div>
                                 <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
                                     <i className="fas fa-times text-2xl"></i>
@@ -858,13 +1211,14 @@
                                         type="text"
                                         value={message}
                                         onChange={(e) => setMessage(e.target.value)}
-                                        onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                                        onKeyPress={(e) => e.key === 'Enter' && !isSending && sendMessage()}
                                         placeholder="Type a message..."
                                         className="flex-1 px-4 py-2 border rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
                                     />
                                     <button
                                         onClick={sendMessage}
-                                        className="bg-blue-600 text-white px-6 py-2 rounded-full hover:bg-blue-700 transition duration-200"
+                                        disabled={isSending}
+                                        className="bg-blue-600 text-white px-6 py-2 rounded-full hover:bg-blue-700 transition duration-200 disabled:opacity-50"
                                     >
                                         <i className="fas fa-paper-plane"></i>
                                     </button>
@@ -880,14 +1234,23 @@
                 const [showCreateModal, setShowCreateModal] = useState(false);
                 const filteredSessions = getFilteredSessions();
                 const joinedSessions = sessions.filter(s => 
-                    s.participants.some(p => p.id === currentUser.id)
+                    s.participants?.some(p => p.id === currentUser.id)
                 );
 
-                const handleLogout = () => {
-                    localStorage.removeItem('groupfit_current_user');
-                    setCurrentUser(null);
-                    setIsLoggedIn(false);
-                    showNotification('Logged out successfully', 'info');
+                const handleLogout = async () => {
+                    if (isFirebaseEnabled) {
+                        try {
+                            await auth.signOut();
+                            showNotification('Logged out successfully', 'info');
+                        } catch (error) {
+                            console.error("Logout error:", error);
+                        }
+                    } else {
+                        localStorage.removeItem('groupfit_current_user');
+                        setCurrentUser(null);
+                        setIsLoggedIn(false);
+                        showNotification('Logged out successfully', 'info');
+                    }
                 };
 
                 return (
@@ -915,8 +1278,22 @@
                                     <div className="flex items-center">
                                         <i className="fas fa-users text-3xl text-blue-600 mr-3"></i>
                                         <h1 className="text-2xl font-bold text-gray-800">GroupFit</h1>
+                                        {isFirebaseEnabled && (
+                                            <span className="ml-3 bg-green-100 text-green-800 text-xs font-medium px-2.5 py-0.5 rounded">
+                                                Online
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="flex items-center space-x-4">
+                                        {!isFirebaseEnabled && (
+                                            <button
+                                                onClick={() => setShowSetupGuide(true)}
+                                                className="bg-yellow-100 text-yellow-700 px-4 py-2 rounded-lg hover:bg-yellow-200 transition duration-200"
+                                            >
+                                                <i className="fas fa-exclamation-triangle mr-2"></i>
+                                                Enable Sync
+                                            </button>
+                                        )}
                                         <div className="text-right">
                                             <p className="text-sm font-medium text-gray-700">Welcome, {currentUser.name}</p>
                                             <p className="text-xs text-gray-500">
@@ -1067,26 +1444,22 @@
                         {selectedSession && (
                             <ChatModal session={selectedSession} onClose={() => setSelectedSession(null)} />
                         )}
+                        {showSetupGuide && <FirebaseSetupGuide />}
                     </div>
                 );
             };
 
-            // Initialize demo data if no users exist
-            useEffect(() => {
-                if (users.length === 0) {
-                    const demoUser = {
-                        id: 'demo1',
-                        email: 'test@groupfit.com',
-                        password: 'password123',
-                        name: 'Test User',
-                        age: 16,
-                        joinedSessions: [],
-                        location: { lat: 40.7128, lng: -74.0060, city: 'New York' },
-                        createdAt: new Date().toISOString()
-                    };
-                    setUsers([demoUser]);
-                }
-            }, []);
+            // Loading Screen
+            if (isLoading) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-blue-600 to-purple-700 flex items-center justify-center">
+                        <div className="text-center">
+                            <div className="loading-spinner mx-auto mb-4"></div>
+                            <p className="text-white text-lg">Loading GroupFit...</p>
+                        </div>
+                    </div>
+                );
+            }
 
             // Main Render Logic
             if (!isLoggedIn) {
